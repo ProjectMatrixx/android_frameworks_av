@@ -20,6 +20,7 @@
 #define LOG_TAG "BundleContext"
 #include <android-base/logging.h>
 #include <audio_utils/power.h>
+#include <media/AidlConversionCppNdk.h>
 #include <Utils.h>
 
 #include "BundleContext.h"
@@ -36,7 +37,7 @@ RetCode BundleContext::init() {
     std::lock_guard lg(mMutex);
     // init with pre-defined preset NORMAL
     for (std::size_t i = 0; i < lvm::MAX_NUM_BANDS; i++) {
-        mBandGainMdB[i] = lvm::kSoftPresets[0 /* normal */][i] * 100;
+        mBandGainmB[i] = lvm::kSoftPresets[0 /* normal */][i] * 100;
     }
 
     // allocate lvm instance
@@ -213,8 +214,8 @@ RetCode BundleContext::limitLevel() {
         bool viEnabled = params.VirtualizerOperatingMode == LVM_MODE_ON;
 
         if (eqEnabled) {
-            for (size_t i = 0; i < lvm::MAX_NUM_BANDS; i++) {
-                float bandFactor = mBandGainMdB[i] / 1500.0;
+            for (unsigned int i = 0; i < lvm::MAX_NUM_BANDS; i++) {
+                float bandFactor = mBandGainmB[i] / 1500.0;
                 float bandCoefficient = lvm::kBandEnergyCoefficient[i];
                 float bandEnergy = bandFactor * bandCoefficient * bandCoefficient;
                 if (bandEnergy > 0) energyContribution += bandEnergy;
@@ -222,9 +223,9 @@ RetCode BundleContext::limitLevel() {
 
             // cross EQ coefficients
             float bandFactorSum = 0;
-            for (size_t i = 0; i < lvm::MAX_NUM_BANDS - 1; i++) {
-                float bandFactor1 = mBandGainMdB[i] / 1500.0;
-                float bandFactor2 = mBandGainMdB[i + 1] / 1500.0;
+            for (unsigned int i = 0; i < lvm::MAX_NUM_BANDS - 1; i++) {
+                float bandFactor1 = mBandGainmB[i] / 1500.0;
+                float bandFactor2 = mBandGainmB[i + 1] / 1500.0;
 
                 if (bandFactor1 > 0 && bandFactor2 > 0) {
                     float crossEnergy =
@@ -245,8 +246,8 @@ RetCode BundleContext::limitLevel() {
             energyContribution += boostFactor * boostCoefficient * boostCoefficient;
 
             if (eqEnabled) {
-                for (size_t i = 0; i < lvm::MAX_NUM_BANDS; i++) {
-                    float bandFactor = mBandGainMdB[i] / 1500.0;
+                for (unsigned int i = 0; i < lvm::MAX_NUM_BANDS; i++) {
+                    float bandFactor = mBandGainmB[i] / 1500.0;
                     float bandCrossCoefficient = lvm::kBassBoostEnergyCrossCoefficient[i];
                     float bandEnergy = boostFactor * bandFactor * bandCrossCoefficient;
                     if (bandEnergy > 0) energyBassBoost += bandEnergy;
@@ -298,7 +299,9 @@ bool BundleContext::isDeviceSupportedBassBoost(
             device != AudioDeviceDescription{AudioDeviceType::OUT_CARKIT,
                                              AudioDeviceDescription::CONNECTION_BT_SCO} &&
             device != AudioDeviceDescription{AudioDeviceType::OUT_SPEAKER,
-                                             AudioDeviceDescription::CONNECTION_BT_A2DP}) {
+                                             AudioDeviceDescription::CONNECTION_BT_A2DP} &&
+            device != AudioDeviceDescription{AudioDeviceType::OUT_SUBMIX,
+                                             AudioDeviceDescription::CONNECTION_VIRTUAL}) {
             return false;
         }
     }
@@ -315,7 +318,9 @@ bool BundleContext::isDeviceSupportedVirtualizer(
             device != AudioDeviceDescription{AudioDeviceType::OUT_HEADPHONE,
                                              AudioDeviceDescription::CONNECTION_BT_A2DP} &&
             device != AudioDeviceDescription{AudioDeviceType::OUT_HEADSET,
-                                             AudioDeviceDescription::CONNECTION_USB}) {
+                                             AudioDeviceDescription::CONNECTION_USB} &&
+            device != AudioDeviceDescription{AudioDeviceType::OUT_SUBMIX,
+                                             AudioDeviceDescription::CONNECTION_VIRTUAL}) {
             return false;
         }
     }
@@ -455,6 +460,7 @@ RetCode BundleContext::setEqualizerPreset(const std::size_t presetIdx) {
 RetCode BundleContext::setEqualizerBandLevels(const std::vector<Equalizer::BandLevel>& bandLevels) {
     RETURN_VALUE_IF(bandLevels.size() > lvm::MAX_NUM_BANDS || bandLevels.empty(),
                     RetCode::ERROR_ILLEGAL_PARAMETER, "sizeExceedMax");
+
     RetCode ret = updateControlParameter(bandLevels);
     if (RetCode::SUCCESS == ret) {
         mCurPresetIdx = lvm::PRESET_CUSTOM;
@@ -469,15 +475,13 @@ std::vector<Equalizer::BandLevel> BundleContext::getEqualizerBandLevels() const 
     std::vector<Equalizer::BandLevel> bandLevels;
     bandLevels.reserve(lvm::MAX_NUM_BANDS);
     for (std::size_t i = 0; i < lvm::MAX_NUM_BANDS; i++) {
-        bandLevels.emplace_back(
-                Equalizer::BandLevel{static_cast<int32_t>(i), mBandGainMdB[i]});
+        bandLevels.emplace_back(Equalizer::BandLevel{static_cast<int32_t>(i), mBandGainmB[i]});
     }
     return bandLevels;
 }
 
 std::vector<int32_t> BundleContext::getEqualizerCenterFreqs() {
     std::vector<int32_t> freqs;
-
     LVM_ControlParams_t params;
     {
         std::lock_guard lg(mMutex);
@@ -504,7 +508,7 @@ RetCode BundleContext::updateControlParameter(const std::vector<Equalizer::BandL
     RETURN_VALUE_IF(!isBandLevelIndexInRange(bandLevels), RetCode::ERROR_ILLEGAL_PARAMETER,
                     "indexOutOfRange");
 
-    std::array<int, lvm::MAX_NUM_BANDS> tempLevel(mBandGainMdB);
+    std::array<int, lvm::MAX_NUM_BANDS> tempLevel(mBandGainmB);
     for (const auto& it : bandLevels) {
         tempLevel[it.index] = it.levelMb;
     }
@@ -525,8 +529,8 @@ RetCode BundleContext::updateControlParameter(const std::vector<Equalizer::BandL
         RETURN_VALUE_IF(LVM_SUCCESS != LVM_SetControlParameters(mInstance, &params),
                         RetCode::ERROR_EFFECT_LIB_ERROR, " setControlParamFailed");
     }
-    mBandGainMdB = tempLevel;
-    LOG(DEBUG) << __func__ << " update bandGain to " << ::android::internal::ToString(mBandGainMdB)
+    mBandGainmB = tempLevel;
+    LOG(DEBUG) << __func__ << " update bandGain to " << ::android::internal::ToString(mBandGainmB)
                << "mdB";
 
     return RetCode::SUCCESS;
@@ -605,10 +609,28 @@ RetCode BundleContext::setForcedDevice(
 }
 
 void BundleContext::initControlParameter(LVM_ControlParams_t& params) const {
+    int channelCount = ::aidl::android::hardware::audio::common::getChannelCount(
+            mCommon.input.base.channelMask);
+    int chMask = mCommon.input.base.channelMask.get<AudioChannelLayout::layoutMask>();
+
+    params.SampleRate = lvmFsForSampleRate(mCommon.input.base.sampleRate);
+    params.NrChannels = channelCount;
+    params.ChMask = (audio_channel_mask_t) chMask;
+
+    /*params.ChMask = aidl2legacy_AudioChannelLayout_audio_channel_mask_t(
+                            mCommon.input.base.channelMask, true)
+                            .value();*/
+
+    if (channelCount == 1) {
+        params.SourceFormat = LVM_MONO;
+    } else if (channelCount == 2) {
+        params.SourceFormat = LVM_STEREO;
+    } else if (channelCount > 2 && channelCount <= LVM_MAX_CHANNELS) {
+        params.SourceFormat = LVM_MULTICHANNEL;
+    }
+
     /* General parameters */
     params.OperatingMode = LVM_MODE_ON;
-    params.SampleRate = LVM_FS_44100;
-    params.SourceFormat = LVM_STEREO;
     params.SpeakerType = LVM_HEADPHONES;
 
     /* Concert Sound parameters */
@@ -642,14 +664,6 @@ void BundleContext::initControlParameter(LVM_ControlParams_t& params) const {
     /* PSA Control parameters */
     params.PSA_Enable = LVM_PSA_OFF;
     params.PSA_PeakDecayRate = LVM_PSA_SPEED_MEDIUM;
-
-    /* TE Control parameters */
-    params.TE_OperatingMode = LVM_TE_OFF;
-    params.TE_EffectLevel = 0;
-
-    params.NrChannels = audio_channel_count_from_out_mask(AUDIO_CHANNEL_OUT_STEREO);
-    params.ChMask = AUDIO_CHANNEL_OUT_STEREO;
-    params.SourceFormat = LVM_STEREO;
 }
 
 void BundleContext::initHeadroomParameter(LVM_HeadroomParams_t& params) const {
@@ -818,13 +832,13 @@ IEffect::Status BundleContext::lvmProcess(float* in, float* out, int samples) {
             LOG(DEBUG) << "Effect_process() processing last frame";
         }
         mNumberEffectsCalled = 0;
-        LVM_UINT16 frames = samples * sizeof(float) / frameSize;
         float* outTmp = (accumulate ? getWorkBuffer() : out);
         /* Process the samples */
         LVM_ReturnStatus_en lvmStatus;
         {
             std::lock_guard lg(mMutex);
-            lvmStatus = LVM_Process(mInstance, in, outTmp, frames, 0);
+
+            lvmStatus = LVM_Process(mInstance, in, outTmp, inputFrameCount, 0);
             if (lvmStatus != LVM_SUCCESS) {
                 LOG(ERROR) << __func__ << lvmStatus;
                 return {EX_UNSUPPORTED_OPERATION, 0, 0};
